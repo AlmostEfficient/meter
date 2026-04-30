@@ -26,7 +26,7 @@ struct UsageState {
     let providers: [Provider]
 }
 
-struct Provider {
+struct Provider: Codable {
     let provider: String
     let displayName: String
     let plan: String?
@@ -34,7 +34,7 @@ struct Provider {
     let windows: [UsageWindow]
 }
 
-struct UsageWindow {
+struct UsageWindow: Codable {
     let label: String
     let leftPercent: Double
     let resetAt: Double?
@@ -472,12 +472,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var abbreviateCodexWeek = true
     private var lastSuccessfulState: UsageState?
 
+    private let cacheURL = FileManager.default.homeDirectoryForCurrentUser
+        .appendingPathComponent(".cache/meter/providers.json")
+
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
         loadSettings()
+        lastSuccessfulState = loadDiskCache()
         buildWindow()
         refreshNow()
         restartTimer()
+    }
+
+    private func loadDiskCache() -> UsageState? {
+        guard let data = try? Data(contentsOf: cacheURL),
+              let providers = try? JSONDecoder().decode([Provider].self, from: data) else { return nil }
+        return UsageState(providers: providers)
+    }
+
+    private func saveDiskCache(_ state: UsageState) {
+        guard let data = try? JSONEncoder().encode(state.providers) else { return }
+        try? FileManager.default.createDirectory(at: cacheURL.deletingLastPathComponent(),
+                                                  withIntermediateDirectories: true)
+        try? data.write(to: cacheURL, options: .atomic)
     }
 
     private func buildWindow() {
@@ -780,15 +797,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         case .success(let state):
             let merge = mergedProviders(from: state)
             let providers = merge.providers
-            lastSuccessfulState = updatedSuccessfulState(from: state)
+            let successfulState = updatedSuccessfulState(from: state)
+            lastSuccessfulState = successfulState
+            saveDiskCache(successfulState)
             let visible = providers.filter { isEnabled($0.provider) }
             for provider in visible {
-                stack.addArrangedSubview(row(for: provider))
+                let isStale = merge.staleProviderIds.contains(provider.provider)
+                stack.addArrangedSubview(row(for: provider, isStale: isStale))
             }
             if visible.isEmpty {
                 stack.addArrangedSubview(textLabel("All providers disabled", size: 12, color: .secondaryLabelColor))
-            } else if visible.contains(where: { merge.staleProviderIds.contains($0.provider) }) {
-                stack.addArrangedSubview(staleFooter())
             }
         case .failure:
             if let stale = lastSuccessfulState {
@@ -879,7 +897,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         layer.add(flash, forKey: "meterFlash")
     }
 
-    private func row(for provider: Provider) -> NSView {
+    private func row(for provider: Provider, isStale: Bool = false) -> NSView {
         let row = NSStackView()
         row.orientation = .horizontal
         row.alignment = .centerY
@@ -894,9 +912,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         copy.orientation = .vertical
         copy.alignment = .leading
         copy.spacing = 1
+        copy.setContentHuggingPriority(.defaultLow, for: .horizontal)
 
         if showProviderName {
-            copy.addArrangedSubview(textLabel(provider.displayName, size: 12, weight: .semibold))
+            let nameRow = NSStackView()
+            nameRow.orientation = .horizontal
+            nameRow.alignment = .centerY
+            nameRow.spacing = 4
+            nameRow.addArrangedSubview(textLabel(provider.displayName, size: 12, weight: .semibold))
+            if isStale {
+                nameRow.addArrangedSubview(textLabel("⏱", size: 9, color: .tertiaryLabelColor))
+            }
+            copy.addArrangedSubview(nameRow)
         }
 
         let visibleWindows = provider.windows.filter { w in
@@ -909,7 +936,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             let summary = summaryField(for: visibleWindows, provider: provider)
             copy.addArrangedSubview(summary)
             copy.setCustomSpacing(4, after: summary)
-            for w in visibleWindows {
+            let barWindows = provider.provider == "codex" ? Array(visibleWindows.prefix(1)) : visibleWindows
+            for w in barWindows {
                 let bar = UsageBarView(
                     usedFraction: CGFloat(1 - w.leftPercent / 100),
                     color: accentColor(forLeftPercent: w.leftPercent)
