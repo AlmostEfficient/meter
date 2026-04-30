@@ -119,6 +119,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var hideCodex5hLabel = true
     private var abbreviateCodexWeek = true
     private var lastSuccessfulState: UsageState?
+    private var logoImageCache: [String: NSImage] = [:]
 
     private let cacheURL = FileManager.default.homeDirectoryForCurrentUser
         .appendingPathComponent(".cache/meter/providers.json")
@@ -128,8 +129,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         loadSettings()
         lastSuccessfulState = loadDiskCache()
         buildWindow()
+        renderInitialState()
+        window.makeKeyAndOrderFront(nil)
         refreshNow()
         restartTimer()
+    }
+
+    private func renderInitialState() {
+        if let cached = lastSuccessfulState, !cached.providers.isEmpty {
+            render(.success(cached), shouldFlash: false)
+        } else {
+            render(.success(UsageState(providers: placeholderProviders())), shouldFlash: false)
+        }
     }
 
     private func loadDiskCache() -> UsageState? {
@@ -194,8 +205,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             let visible = screen.visibleFrame
             window.setFrameOrigin(NSPoint(x: visible.maxX - 270, y: visible.maxY - 140))
         }
-
-        window.makeKeyAndOrderFront(nil)
 
         NotificationCenter.default.addObserver(
             forName: NSWindow.didMoveNotification,
@@ -460,36 +469,51 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func loadState() -> Result<UsageState, Error> {
-        var codex: Provider?
-        var claude: Provider?
-        var cursor: Provider?
-        var crof: Provider?
-        var openRouter: Provider?
-        var openAI: Provider?
-        var anthropic: Provider?
         let group = DispatchGroup()
+        let providersToFetch = enabledProviderFetchers()
+        var providers = Array<Provider?>(repeating: nil, count: providersToFetch.count)
+        let lock = NSLock()
 
-        group.enter()
-        DispatchQueue.global().async { codex = fetchCodex(); group.leave() }
-        group.enter()
-        DispatchQueue.global().async { claude = fetchClaude(); group.leave() }
-        group.enter()
-        DispatchQueue.global().async { cursor = fetchCursor(); group.leave() }
-        group.enter()
-        DispatchQueue.global().async { crof = fetchCrof(); group.leave() }
-        group.enter()
-        DispatchQueue.global().async { openRouter = fetchOpenRouter(); group.leave() }
-        group.enter()
-        DispatchQueue.global().async { openAI = fetchOpenAI(); group.leave() }
-        group.enter()
-        DispatchQueue.global().async { anthropic = fetchAnthropicAPI(); group.leave() }
+        for (index, fetch) in providersToFetch.enumerated() {
+            group.enter()
+            DispatchQueue.global(qos: .utility).async {
+                let provider = fetch()
+                lock.lock()
+                providers[index] = provider
+                lock.unlock()
+                group.leave()
+            }
+        }
         group.wait()
 
-        let providers = [codex, claude, cursor, crof, openRouter, openAI, anthropic].compactMap { $0 }
-        return .success(UsageState(providers: providers))
+        return .success(UsageState(providers: providers.compactMap { $0 }))
     }
 
-    private func render(_ result: Result<UsageState, Error>) {
+    private func enabledProviderFetchers() -> [() -> Provider] {
+        var fetchers: [() -> Provider] = []
+        if enableCodex { fetchers.append(fetchCodex) }
+        if enableClaude { fetchers.append(fetchClaude) }
+        if enableCursor { fetchers.append(fetchCursor) }
+        if enableCrof { fetchers.append(fetchCrof) }
+        if enableOpenRouter { fetchers.append(fetchOpenRouter) }
+        if enableOpenAI { fetchers.append(fetchOpenAI) }
+        if enableAnthropic { fetchers.append(fetchAnthropicAPI) }
+        return fetchers
+    }
+
+    private func placeholderProviders() -> [Provider] {
+        [
+            Provider(provider: "codex", displayName: "Codex", plan: nil, error: "Loading...", windows: []),
+            Provider(provider: "claude", displayName: "Claude", plan: nil, error: "Loading...", windows: []),
+            Provider(provider: "cursor", displayName: "Cursor", plan: nil, error: "Loading...", windows: []),
+            Provider(provider: "crof", displayName: "Crof", plan: nil, error: "Loading...", windows: []),
+            Provider(provider: "openrouter", displayName: "OpenRouter", plan: nil, error: "Loading...", windows: []),
+            Provider(provider: "openai", displayName: "OpenAI", plan: nil, error: "Loading...", windows: []),
+            Provider(provider: "anthropic", displayName: "Anthropic", plan: nil, error: "Loading...", windows: []),
+        ].filter { isEnabled($0.provider) }
+    }
+
+    private func render(_ result: Result<UsageState, Error>, shouldFlash: Bool = true) {
         stack.arrangedSubviews.forEach { view in
             stack.removeArrangedSubview(view)
             view.removeFromSuperview()
@@ -500,8 +524,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             let merge = mergedProviders(from: state)
             let providers = merge.providers
             let successfulState = updatedSuccessfulState(from: state)
-            lastSuccessfulState = successfulState
-            saveDiskCache(successfulState)
+            if !successfulState.providers.isEmpty {
+                lastSuccessfulState = successfulState
+                saveDiskCache(successfulState)
+            }
             let visible = providers.filter { isEnabled($0.provider) }
             for (i, provider) in visible.enumerated() {
                 let isStale = merge.staleProviderIds.contains(provider.provider)
@@ -523,7 +549,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         resizeToFit()
-        flashUpdate()
+        if shouldFlash { flashUpdate() }
     }
 
     private func addProviderRow(for provider: Provider, isStale: Bool = false, staggerIndex: Int = 0) {
@@ -570,6 +596,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func updatedSuccessfulState(from state: UsageState) -> UsageState {
+        if state.providers.allSatisfy({ $0.error == "Loading..." && $0.windows.isEmpty }) {
+            return lastSuccessfulState ?? UsageState(providers: [])
+        }
+
         guard let previous = lastSuccessfulState?.providers, !previous.isEmpty else {
             return UsageState(providers: state.providers.filter { !$0.windows.isEmpty })
         }
@@ -795,9 +825,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func logoImage(for provider: String) -> NSImage? {
+        if let cached = logoImageCache[provider] { return cached }
         for path in logoPaths[provider] ?? [] {
             if let image = NSImage(contentsOfFile: path) {
                 image.isTemplate = provider == "codex"
+                logoImageCache[provider] = image
                 return image
             }
         }
