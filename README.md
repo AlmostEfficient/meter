@@ -16,7 +16,7 @@ Floating macOS overlay showing AI tool usage (Claude, Cursor, Codex). Self-conta
 ./meter.sh
 ```
 
-Compiles `Meter.swift` on first run (or when the source changes), then launches the overlay. The panel floats above all windows, persists across Spaces, and refreshes every 60 seconds.
+Compiles the Swift sources on first run (or when any source changes), then launches the overlay. The panel floats above all windows, persists across Spaces, and refreshes every 60 seconds.
 
 ## Usage
 
