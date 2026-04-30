@@ -42,6 +42,23 @@ launchctl stop com.$(whoami).meter && launchctl start com.$(whoami).meter
 | Cursor | — | `~/.config/meter/cursor-cookie` or `$CURSOR_COOKIE` |
 | Crof | — | `~/.config/meter/crof` or `$CROF_SESSION` |
 | OpenRouter | — | `~/.config/meter/openrouter` or `$OPENROUTER_API_KEY` |
+| OpenAI | — | `~/.config/meter/openai` or `$OPENAI_ADMIN_KEY` or Keychain |
+| Anthropic | — | Keychain (preferred) or `~/.config/meter/anthropic` or `$ANTHROPIC_ADMIN_KEY` |
+
+### OpenAI & Anthropic admin keys
+
+Both providers require an **admin API key** (not a regular API key) to access spending data.
+
+**OpenAI:** Get one at [platform.openai.com → Organization → Admin Keys](https://platform.openai.com/settings/organization/admin-keys). Save it to `~/.config/meter/openai`. Read only is fine. 
+
+**Anthropic:** Requires an organization account (Console → Settings → Organization). Once set up, create an admin key at Console → Settings → Admin Keys — it starts with `sk-ant-admin...`.
+
+Because the Anthropic admin key has broad org-level write access, store it in the Keychain rather than a flat file:
+
+1. Open **Keychain Access** → File → New Password Item
+2. Set **Keychain Item Name** and **Account Name** both to `meter-claude-admin-key`
+3. Paste the key as the password and click **Add**
+4. When macOS prompts on first run, click **Always Allow** so Meter can read it without prompting every refresh.
 
 ## CLI
 

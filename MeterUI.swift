@@ -51,6 +51,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         static let enableCodex = "MeterEnableCodex"
         static let enableCrof = "MeterEnableCrof"
         static let enableOpenRouter = "MeterEnableOpenRouter"
+        static let enableOpenAI = "MeterEnableOpenAI"
+        static let enableAnthropic = "MeterEnableAnthropic"
         static let showCursorOnDemand = "MeterShowCursorOnDemand"
         static let hideCodex5hLabel = "MeterHideCodex5hLabel"
         static let abbreviateCodexWeek = "MeterAbbreviateCodexWeek"
@@ -73,6 +75,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var enableCodex = true
     private var enableCrof = true
     private var enableOpenRouter = false
+    private var enableOpenAI = false
+    private var enableAnthropic = false
     private var showCursorOnDemand = false
     private var hideCodex5hLabel = true
     private var abbreviateCodexWeek = true
@@ -180,6 +184,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             SettingKey.enableCodex: true,
             SettingKey.enableCrof: false,
             SettingKey.enableOpenRouter: false,
+            SettingKey.enableOpenAI: false,
+            SettingKey.enableAnthropic: false,
             SettingKey.showCursorOnDemand: false,
             SettingKey.hideCodex5hLabel: true,
             SettingKey.abbreviateCodexWeek: true,
@@ -197,6 +203,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         enableCodex = defaults.bool(forKey: SettingKey.enableCodex)
         enableCrof = defaults.bool(forKey: SettingKey.enableCrof)
         enableOpenRouter = defaults.bool(forKey: SettingKey.enableOpenRouter)
+        enableOpenAI = defaults.bool(forKey: SettingKey.enableOpenAI)
+        enableAnthropic = defaults.bool(forKey: SettingKey.enableAnthropic)
         showCursorOnDemand = defaults.bool(forKey: SettingKey.showCursorOnDemand)
         hideCodex5hLabel = defaults.bool(forKey: SettingKey.hideCodex5hLabel)
         abbreviateCodexWeek = defaults.bool(forKey: SettingKey.abbreviateCodexWeek)
@@ -221,6 +229,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         case "codex": return enableCodex
         case "crof": return enableCrof
         case "openrouter": return enableOpenRouter
+        case "openai": return enableOpenAI
+        case "anthropic": return enableAnthropic
         default: return true
         }
     }
@@ -272,6 +282,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         providersMenu.addItem(hide5h)
         providersMenu.addItem(.separator())
         providersMenu.addItem(toggleItem("Crof", action: #selector(toggleEnableCrof), state: enableCrof))
+        providersMenu.addItem(.separator())
+        providersMenu.addItem(toggleItem("OpenAI API", action: #selector(toggleEnableOpenAI), state: enableOpenAI))
+        providersMenu.addItem(toggleItem("Anthropic API", action: #selector(toggleEnableAnthropic), state: enableAnthropic))
         providersMenu.addItem(toggleItem("OpenRouter", action: #selector(toggleEnableOpenRouter), state: enableOpenRouter))
 
         providersItem.submenu = providersMenu
@@ -370,6 +383,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         refreshNow()
     }
 
+    @objc private func toggleEnableOpenAI() {
+        enableOpenAI.toggle()
+        defaults.set(enableOpenAI, forKey: SettingKey.enableOpenAI)
+        refreshNow()
+    }
+
+    @objc private func toggleEnableAnthropic() {
+        enableAnthropic.toggle()
+        defaults.set(enableAnthropic, forKey: SettingKey.enableAnthropic)
+        refreshNow()
+    }
+
     @objc private func toggleShowCursorOnDemand() {
         showCursorOnDemand.toggle()
         defaults.set(showCursorOnDemand, forKey: SettingKey.showCursorOnDemand)
@@ -402,6 +427,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         var cursor: Provider?
         var crof: Provider?
         var openRouter: Provider?
+        var openAI: Provider?
+        var anthropic: Provider?
         let group = DispatchGroup()
 
         group.enter()
@@ -414,9 +441,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         DispatchQueue.global().async { crof = fetchCrof(); group.leave() }
         group.enter()
         DispatchQueue.global().async { openRouter = fetchOpenRouter(); group.leave() }
+        group.enter()
+        DispatchQueue.global().async { openAI = fetchOpenAI(); group.leave() }
+        group.enter()
+        DispatchQueue.global().async { anthropic = fetchAnthropicAPI(); group.leave() }
         group.wait()
 
-        let providers = [codex, claude, cursor, crof, openRouter].compactMap { $0 }
+        let providers = [codex, claude, cursor, crof, openRouter, openAI, anthropic].compactMap { $0 }
         return .success(UsageState(providers: providers))
     }
 
@@ -574,7 +605,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         } else {
             let summary = summaryField(for: visibleWindows, provider: provider)
             copy.addArrangedSubview(summary)
-            let barWindows: [UsageWindow] = provider.provider == "openrouter" ? [] : provider.provider == "codex" ? Array(visibleWindows.prefix(1)) : visibleWindows
+            let barWindows: [UsageWindow] = (provider.provider == "openrouter" || provider.provider == "openai" || provider.provider == "anthropic") ? [] : provider.provider == "codex" ? Array(visibleWindows.prefix(1)) : visibleWindows
             if !barWindows.isEmpty {
                 copy.setCustomSpacing(4, after: summary)
                 let barContainer = NSView()
@@ -651,9 +682,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let font = NSFont.systemFont(ofSize: summaryLineFontSize, weight: .regular)
         let muted = summaryMutedAttributes(font: font)
         let attr: NSAttributedString = {
-            if provider.provider == "openrouter", let w = windows.first, let remaining = w.used {
-                let formatted = String(format: "$%.2f", remaining)
-                return NSAttributedString(string: formatted, attributes: [.font: font, .foregroundColor: accentColor(forLeftPercent: w.leftPercent)])
+            if (provider.provider == "openrouter" || provider.provider == "openai" || provider.provider == "anthropic"), let w = windows.first, let cost = w.used {
+                let formatted = String(format: "$%.2f", cost)
+                return NSAttributedString(string: formatted, attributes: [.font: font, .foregroundColor: NSColor.labelColor])
             }
             if provider.provider == "codex", windows.count > 1 {
                 let result = NSMutableAttributedString()
@@ -741,6 +772,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         case "cursor": return "⌬"
         case "crof": return "⚡"
         case "openrouter": return "◈"
+        case "openai": return "◉"
+        case "anthropic": return "◆"
         default: return "•"
         }
     }

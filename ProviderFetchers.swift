@@ -435,3 +435,122 @@ func fetchOpenRouter() -> Provider {
         return Provider(provider: "openrouter", displayName: "OpenRouter", plan: nil, error: error.localizedDescription, windows: [])
     }
 }
+
+// MARK: - OpenAI API
+
+private func startOfMonthUnix() -> Int {
+    let cal = Calendar(identifier: .gregorian)
+    var comps = cal.dateComponents([.year, .month], from: Date())
+    comps.day = 1; comps.hour = 0; comps.minute = 0; comps.second = 0
+    return Int(cal.date(from: comps)!.timeIntervalSince1970)
+}
+
+private func startOfMonthISO() -> String {
+    let cal = Calendar(identifier: .gregorian)
+    var comps = cal.dateComponents([.year, .month], from: Date())
+    comps.day = 1; comps.hour = 0; comps.minute = 0; comps.second = 0
+    let f = ISO8601DateFormatter()
+    f.formatOptions = [.withInternetDateTime]
+    return f.string(from: cal.date(from: comps)!)
+}
+
+private func nowISO() -> String {
+    let f = ISO8601DateFormatter()
+    f.formatOptions = [.withInternetDateTime]
+    return f.string(from: Date())
+}
+
+private struct OpenAICostsResponse: Decodable {
+    struct Bucket: Decodable {
+        let result: [CostResult]?
+    }
+    struct CostResult: Decodable {
+        struct Amount: Decodable {
+            let value: Double?
+        }
+        let amount: Amount?
+    }
+    let data: [Bucket]?
+}
+
+func fetchOpenAI() -> Provider {
+    let keyPath = FileManager.default.homeDirectoryForCurrentUser
+        .appendingPathComponent(".config/meter/openai")
+    let apiKey = environment["OPENAI_ADMIN_KEY"]
+        ?? readKeychainPassword(service: "OpenAI-Admin", account: "openai")
+        ?? (try? String(contentsOf: keyPath, encoding: .utf8))?.trimmingCharacters(in: .whitespacesAndNewlines)
+
+    guard let apiKey, !apiKey.isEmpty else {
+        return Provider(provider: "openai", displayName: "OpenAI", plan: nil,
+                        error: "No key — set OPENAI_ADMIN_KEY or save to ~/.config/meter/openai", windows: [])
+    }
+
+    let start = startOfMonthUnix()
+    let now = Int(Date().timeIntervalSince1970)
+
+    do {
+        let data = try syncFetch(
+            url: URL(string: "https://api.openai.com/v1/organization/costs?start_time=\(start)&end_time=\(now)&bucket_width=1d&limit=31")!,
+            headers: [
+                "Authorization": "Bearer \(apiKey)",
+                "Content-Type": "application/json",
+                "User-Agent": "Meter",
+            ],
+            timeoutInterval: 15
+        )
+        let resp = try JSONDecoder().decode(OpenAICostsResponse.self, from: data)
+        let results = resp.data?.flatMap { $0.result ?? [] } ?? []
+        let total = results.compactMap { $0.amount?.value }.reduce(0.0, +)
+        let w = UsageWindow(label: "Month", leftPercent: 0, resetAt: nil,
+                            used: (total * 100).rounded() / 100, limit: nil)
+        return Provider(provider: "openai", displayName: "OpenAI", plan: nil, error: nil, windows: [w])
+    } catch {
+        return Provider(provider: "openai", displayName: "OpenAI", plan: nil, error: error.localizedDescription, windows: [])
+    }
+}
+
+// MARK: - Anthropic API
+
+private struct AnthropicCostResponse: Decodable {
+    struct Bucket: Decodable {
+        let results: [CostResult]?
+    }
+    struct CostResult: Decodable {
+        let amount: String?
+        let currency: String?
+    }
+    let data: [Bucket]?
+}
+
+func fetchAnthropicAPI() -> Provider {
+    let keyPath = FileManager.default.homeDirectoryForCurrentUser
+        .appendingPathComponent(".config/meter/anthropic")
+    let apiKey = environment["ANTHROPIC_ADMIN_KEY"]
+        ?? readKeychainPassword(service: "meter-claude-admin-key", account: "meter-claude-admin-key")
+        ?? (try? String(contentsOf: keyPath, encoding: .utf8))?.trimmingCharacters(in: .whitespacesAndNewlines)
+
+    guard let apiKey, !apiKey.isEmpty else {
+        return Provider(provider: "anthropic", displayName: "Anthropic", plan: nil,
+                        error: "No key — set ANTHROPIC_ADMIN_KEY or save to ~/.config/meter/anthropic", windows: [])
+    }
+
+    do {
+        let data = try syncFetch(
+            url: URL(string: "https://api.anthropic.com/v1/organizations/cost_report?starting_at=\(startOfMonthISO())&ending_at=\(nowISO())")!,
+            headers: [
+                "x-api-key": apiKey,
+                "anthropic-version": "2023-06-01",
+                "Accept": "application/json",
+                "User-Agent": "Meter",
+            ]
+        )
+        let resp = try JSONDecoder().decode(AnthropicCostResponse.self, from: data)
+        let totalCents = resp.data?.flatMap { $0.results ?? [] }.compactMap { Double($0.amount ?? "") }.reduce(0, +) ?? 0
+        let totalDollars = (totalCents / 100.0 * 100).rounded() / 100
+        let w = UsageWindow(label: "Month", leftPercent: 0, resetAt: nil,
+                            used: totalDollars, limit: nil)
+        return Provider(provider: "anthropic", displayName: "Anthropic", plan: nil, error: nil, windows: [w])
+    } catch {
+        return Provider(provider: "anthropic", displayName: "Anthropic", plan: nil, error: error.localizedDescription, windows: [])
+    }
+}

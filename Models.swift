@@ -23,6 +23,12 @@ let logoPaths = [
     "openrouter": [
         "\(overlayRoot)/assets/openrouter.png",
     ],
+    "openai": [
+        "\(overlayRoot)/assets/openai.png",
+    ],
+    "anthropic": [
+        "\(overlayRoot)/assets/anthropic.png",
+    ],
 ]
 
 struct UsageState {
@@ -47,10 +53,10 @@ struct UsageWindow: Codable {
 
 // MARK: - Fetch helpers
 
-func syncFetch(url: URL, headers: [String: String] = [:]) throws -> Data {
+func syncFetch(url: URL, headers: [String: String] = [:], timeoutInterval: TimeInterval = 5) throws -> Data {
     var result: Result<Data, Error>?
     let sem = DispatchSemaphore(value: 0)
-    var request = URLRequest(url: url, timeoutInterval: 5)
+    var request = URLRequest(url: url, timeoutInterval: timeoutInterval)
     for (k, v) in headers { request.setValue(v, forHTTPHeaderField: k) }
     URLSession.shared.dataTask(with: request) { data, response, error in
         if let error = error {
