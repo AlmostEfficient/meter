@@ -1,0 +1,47 @@
+# macOS
+.DS_Store
+
+# Swift Package Manager
+.build/
+Packages/
+*.xcodeproj/
+*.xcworkspace/
+xcuserdata/
+
+# Xcode
+DerivedData/
+*.pbxuser
+*.mode1v3
+*.mode2v3
+*.perspectivev3
+xcuserdata/
+*.xccheckout
+*.moved-aside
+*.xcuserstate
+*.xcworkspacedata
+*.xcplayground
+*.playgrounddata
+
+# SwiftPM
+.swiftpm/
+
+# Caches
+*.ipa
+*.dSYM.zip
+*.dSYM
+
+# CocoaPods
+Pods/
+Podfile.lock
+
+# Test outputs
+*.test.sbt
+
+# Temporary files
+*.swp
+*.swo
+*~
+
+# Binary/output
+meter
+Meter
