@@ -5,7 +5,6 @@ import Foundation
 
 private let environment = ProcessInfo.processInfo.environment
 private let overlayRoot = URL(fileURLWithPath: #filePath).deletingLastPathComponent().path
-private let meterCommand = environment["METER_COMMAND"] ?? "usage-hud"
 private let logoPaths = [
     "codex": [
         "/Applications/Codex.app/Contents/Resources/codexTemplate@2x.png",
@@ -23,11 +22,11 @@ private let logoPaths = [
     ],
 ]
 
-struct UsageState: Decodable {
+struct UsageState {
     let providers: [Provider]
 }
 
-struct Provider: Decodable {
+struct Provider {
     let provider: String
     let displayName: String
     let plan: String?
@@ -35,12 +34,395 @@ struct Provider: Decodable {
     let windows: [UsageWindow]
 }
 
-struct UsageWindow: Decodable {
+struct UsageWindow {
     let label: String
     let leftPercent: Double
     let resetAt: Double?
     let used: Double?
     let limit: Double?
+}
+
+// MARK: - Fetch helpers
+
+private func syncFetch(url: URL, headers: [String: String] = [:]) throws -> Data {
+    var result: Result<Data, Error>?
+    let sem = DispatchSemaphore(value: 0)
+    var request = URLRequest(url: url, timeoutInterval: 5)
+    for (k, v) in headers { request.setValue(v, forHTTPHeaderField: k) }
+    URLSession.shared.dataTask(with: request) { data, response, error in
+        if let error = error {
+            result = .failure(error)
+        } else if let http = response as? HTTPURLResponse, !(200..<300).contains(http.statusCode) {
+            result = .failure(NSError(domain: "Meter", code: http.statusCode, userInfo: [NSLocalizedDescriptionKey: "HTTP \(http.statusCode)"]))
+        } else if let data = data {
+            result = .success(data)
+        } else {
+            result = .failure(NSError(domain: "Meter", code: -1, userInfo: [NSLocalizedDescriptionKey: "No data"]))
+        }
+        sem.signal()
+    }.resume()
+    sem.wait()
+    return try result!.get()
+}
+
+private func clampPercent(_ v: Double) -> Double { max(0, min(100, v)) }
+
+private func isoToEpochMs(_ s: String?) -> Double? {
+    guard let s else { return nil }
+    let f = ISO8601DateFormatter()
+    f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+    if let d = f.date(from: s) { return d.timeIntervalSince1970 * 1000 }
+    f.formatOptions = [.withInternetDateTime]
+    return f.date(from: s).map { $0.timeIntervalSince1970 * 1000 }
+}
+
+private func epochSecToMs(_ v: Double?) -> Double? {
+    guard let v, v > 0 else { return nil }
+    return v * 1000
+}
+
+private func titleCase(_ s: String) -> String {
+    s.prefix(1).uppercased() + s.dropFirst()
+}
+
+private func window(label: String, usedPercent: Double, resetAtMs: Double?, used: Double? = nil, limit: Double? = nil) -> UsageWindow {
+    UsageWindow(label: label, leftPercent: clampPercent(100 - clampPercent(usedPercent)), resetAt: resetAtMs, used: used, limit: limit)
+}
+
+// MARK: - Claude
+
+private struct ClaudeCredFile: Decodable {
+    struct OAuth: Decodable {
+        let accessToken: String?
+        let subscriptionType: String?
+        let expiresAt: Double?
+    }
+    let claudeAiOauth: OAuth?
+}
+
+private func claudePlan(_ subscriptionType: String?) -> String? {
+    guard let s = subscriptionType, !s.isEmpty else { return nil }
+    let lower = s.lowercased()
+    if lower.contains("api") { return nil }
+    if lower.contains("max") { return "Max" }
+    if lower.contains("pro") { return "Pro" }
+    if lower.contains("team") { return "Team" }
+    return titleCase(s)
+}
+
+private func readClaudeCredentials() -> (token: String, subscriptionType: String?)? {
+    let now = Date().timeIntervalSince1970 * 1000
+    let decoder = JSONDecoder()
+
+    func parse(_ data: Data) -> ClaudeCredFile.OAuth? {
+        guard let f = try? decoder.decode(ClaudeCredFile.self, from: data),
+              let oauth = f.claudeAiOauth,
+              let token = oauth.accessToken, !token.isEmpty else { return nil }
+        if let exp = oauth.expiresAt, exp <= now { return nil }
+        return oauth
+    }
+
+    var keychainOAuth: ClaudeCredFile.OAuth?
+    let proc = Process()
+    proc.executableURL = URL(fileURLWithPath: "/usr/bin/security")
+    proc.arguments = ["find-generic-password", "-s", "Claude Code-credentials", "-w"]
+    let pipe = Pipe()
+    proc.standardOutput = pipe
+    proc.standardError = Pipe()
+    if (try? proc.run()) != nil {
+        proc.waitUntilExit()
+        if proc.terminationStatus == 0,
+           let raw = String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8)?
+               .trimmingCharacters(in: .whitespacesAndNewlines),
+           let data = raw.data(using: .utf8) {
+            keychainOAuth = parse(data)
+        }
+    }
+
+    var fileOAuth: ClaudeCredFile.OAuth?
+    let filePath = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".claude.json")
+    if let data = try? Data(contentsOf: filePath) {
+        fileOAuth = parse(data)
+    }
+
+    if let oauth = keychainOAuth {
+        return (oauth.accessToken!, oauth.subscriptionType ?? fileOAuth?.subscriptionType)
+    }
+    if let oauth = fileOAuth {
+        return (oauth.accessToken!, oauth.subscriptionType)
+    }
+    return nil
+}
+
+private struct ClaudeHudCache: Decodable {
+    struct Payload: Decodable {
+        let fiveHour: Double?
+        let fiveHourResetAt: String?
+        let sevenDay: Double?
+        let sevenDayResetAt: String?
+        let planName: String?
+    }
+    let data: Payload?
+}
+
+private func readClaudeHudFallback() -> Provider? {
+    let path = FileManager.default.homeDirectoryForCurrentUser
+        .appendingPathComponent(".claude/plugins/claude-hud/.usage-cache.json")
+    guard let data = try? Data(contentsOf: path),
+          let cache = try? JSONDecoder().decode(ClaudeHudCache.self, from: data),
+          let d = cache.data else { return nil }
+    var windows: [UsageWindow] = []
+    if let pct = d.fiveHour {
+        windows.append(window(label: "5h", usedPercent: pct, resetAtMs: isoToEpochMs(d.fiveHourResetAt)))
+    }
+    if let pct = d.sevenDay {
+        windows.append(window(label: "Week", usedPercent: pct, resetAtMs: isoToEpochMs(d.sevenDayResetAt)))
+    }
+    guard !windows.isEmpty else { return nil }
+    return Provider(provider: "claude", displayName: "Claude", plan: d.planName, error: nil, windows: windows)
+}
+
+private struct ClaudeUsageResponse: Decodable {
+    struct Window: Decodable {
+        let utilization: Double?
+        let resetsAt: String?
+        enum CodingKeys: String, CodingKey {
+            case utilization
+            case resetsAt = "resets_at"
+        }
+    }
+    let fiveHour: Window?
+    let sevenDay: Window?
+    enum CodingKeys: String, CodingKey {
+        case fiveHour = "five_hour"
+        case sevenDay = "seven_day"
+    }
+}
+
+private func fetchClaude() -> Provider {
+    let fallback = readClaudeHudFallback()
+
+    guard let creds = readClaudeCredentials() else {
+        return fallback ?? Provider(provider: "claude", displayName: "Claude", plan: nil, error: "No credentials", windows: [])
+    }
+    let plan = claudePlan(creds.subscriptionType) ?? fallback?.plan
+    guard plan != nil else {
+        return fallback ?? Provider(provider: "claude", displayName: "Claude", plan: nil, error: "No subscription", windows: [])
+    }
+
+    do {
+        let data = try syncFetch(
+            url: URL(string: "https://api.anthropic.com/api/oauth/usage")!,
+            headers: [
+                "Authorization": "Bearer \(creds.token)",
+                "Accept": "application/json",
+                "anthropic-beta": "oauth-2025-04-20",
+                "User-Agent": "Meter",
+            ]
+        )
+        let resp = try JSONDecoder().decode(ClaudeUsageResponse.self, from: data)
+        var windows: [UsageWindow] = []
+        if let w = resp.fiveHour, let pct = w.utilization {
+            windows.append(window(label: "5h", usedPercent: pct, resetAtMs: isoToEpochMs(w.resetsAt)))
+        }
+        if let w = resp.sevenDay, let pct = w.utilization {
+            windows.append(window(label: "Week", usedPercent: pct, resetAtMs: isoToEpochMs(w.resetsAt)))
+        }
+        return Provider(provider: "claude", displayName: "Claude", plan: plan, error: nil, windows: windows)
+    } catch {
+        return Provider(provider: "claude", displayName: "Claude", plan: plan, error: error.localizedDescription, windows: [])
+    }
+}
+
+// MARK: - Codex
+
+private struct CodexAuthFile: Decodable {
+    struct Tokens: Decodable {
+        let accessToken: String?
+        let accountId: String?
+        enum CodingKeys: String, CodingKey {
+            case accessToken = "access_token"
+            case accountId = "account_id"
+        }
+    }
+    let tokens: Tokens?
+    let accessToken: String?
+    enum CodingKeys: String, CodingKey {
+        case tokens
+        case accessToken = "access_token"
+    }
+}
+
+private func jwtAccountId(_ token: String) -> String? {
+    let parts = token.split(separator: ".")
+    guard parts.count >= 2 else { return nil }
+    var b64 = String(parts[1]).replacingOccurrences(of: "-", with: "+").replacingOccurrences(of: "_", with: "/")
+    let pad = b64.count % 4
+    if pad > 0 { b64 += String(repeating: "=", count: 4 - pad) }
+    guard let data = Data(base64Encoded: b64),
+          let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+          let auth = json["https://api.openai.com/auth"] as? [String: Any],
+          let id = auth["chatgpt_account_id"] as? String else { return nil }
+    return id
+}
+
+private struct CodexUsageResponse: Decodable {
+    struct RateLimit: Decodable {
+        let primaryWindow: WindowData?
+        let secondaryWindow: WindowData?
+        enum CodingKeys: String, CodingKey {
+            case primaryWindow = "primary_window"
+            case secondaryWindow = "secondary_window"
+        }
+    }
+    struct WindowData: Decodable {
+        let usedPercent: Double?
+        let resetAt: Double?
+        let limitWindowSeconds: Double?
+        enum CodingKeys: String, CodingKey {
+            case usedPercent = "used_percent"
+            case resetAt = "reset_at"
+            case limitWindowSeconds = "limit_window_seconds"
+        }
+    }
+    let rateLimit: RateLimit?
+    let planType: String?
+    enum CodingKeys: String, CodingKey {
+        case rateLimit = "rate_limit"
+        case planType = "plan_type"
+    }
+}
+
+private func fetchCodex() -> Provider {
+    let authPath = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".codex/auth.json")
+    guard let authData = try? Data(contentsOf: authPath),
+          let auth = try? JSONDecoder().decode(CodexAuthFile.self, from: authData) else {
+        return Provider(provider: "codex", displayName: "Codex", plan: nil, error: "No auth file", windows: [])
+    }
+    guard let token = auth.tokens?.accessToken ?? auth.accessToken else {
+        return Provider(provider: "codex", displayName: "Codex", plan: nil, error: "No token", windows: [])
+    }
+    let accountId = auth.tokens?.accountId ?? jwtAccountId(token)
+
+    do {
+        var headers: [String: String] = [
+            "Authorization": "Bearer \(token)",
+            "Accept": "application/json",
+            "User-Agent": "Meter",
+        ]
+        if let id = accountId { headers["ChatGPT-Account-Id"] = id }
+
+        let data = try syncFetch(url: URL(string: "https://chatgpt.com/backend-api/wham/usage")!, headers: headers)
+        let resp = try JSONDecoder().decode(CodexUsageResponse.self, from: data)
+        let plan = resp.planType.map { titleCase($0) }
+
+        var windows: [UsageWindow] = []
+        if let w = resp.rateLimit?.primaryWindow, let pct = w.usedPercent {
+            let secs = w.limitWindowSeconds ?? 18_000
+            windows.append(window(label: "\(Int(secs / 3600))h", usedPercent: pct, resetAtMs: epochSecToMs(w.resetAt)))
+        }
+        if let w = resp.rateLimit?.secondaryWindow, let pct = w.usedPercent {
+            let secs = w.limitWindowSeconds ?? 604_800
+            let label = secs >= 604_800 ? "Week" : secs >= 86_400 ? "Day" : "\(Int(secs / 3600))h"
+            windows.append(window(label: label, usedPercent: pct, resetAtMs: epochSecToMs(w.resetAt)))
+        }
+        return Provider(provider: "codex", displayName: "Codex", plan: plan, error: nil, windows: windows)
+    } catch {
+        return Provider(provider: "codex", displayName: "Codex", plan: nil, error: error.localizedDescription, windows: [])
+    }
+}
+
+// MARK: - Cursor
+
+private struct CursorUsageResponse: Decodable {
+    struct IndividualUsage: Decodable {
+        let plan: PlanData?
+        let onDemand: PlanData?
+    }
+    struct PlanData: Decodable {
+        let enabled: Bool?
+        let used: Double?
+        let limit: Double?
+        let totalPercentUsed: Double?
+    }
+    let individualUsage: IndividualUsage?
+    let billingCycleEnd: String?
+    let membershipType: String?
+}
+
+private func fetchCursor() -> Provider {
+    let cookiePath = FileManager.default.homeDirectoryForCurrentUser
+        .appendingPathComponent(".config/usage-hud/cursor-cookie")
+    let cookie = environment["CURSOR_COOKIE"]
+        ?? (try? String(contentsOf: cookiePath, encoding: .utf8))?.trimmingCharacters(in: .whitespacesAndNewlines)
+
+    guard let cookie, !cookie.isEmpty else {
+        return Provider(provider: "cursor", displayName: "Cursor", plan: nil,
+                        error: "No cookie — save to ~/.config/usage-hud/cursor-cookie", windows: [])
+    }
+
+    do {
+        let ts = Int(Date().timeIntervalSince1970 * 1000)
+        let data = try syncFetch(
+            url: URL(string: "https://cursor.com/api/usage-summary?ts=\(ts)")!,
+            headers: [
+                "Accept": "application/json",
+                "Cookie": cookie,
+                "Cache-Control": "no-cache",
+                "Pragma": "no-cache",
+                "Referer": "https://cursor.com/dashboard/usage",
+                "User-Agent": "Meter",
+            ]
+        )
+        let resp = try JSONDecoder().decode(CursorUsageResponse.self, from: data)
+        let plan = resp.membershipType.map { titleCase($0) }
+        let resetMs = isoToEpochMs(resp.billingCycleEnd)
+
+        var windows: [UsageWindow] = []
+        if let p = resp.individualUsage?.plan, p.enabled == true {
+            let used = p.used ?? 0
+            let limit = p.limit ?? 0
+            let pct = limit > 0 ? (used / limit) * 100 : (p.totalPercentUsed ?? 0)
+            windows.append(window(label: "Month", usedPercent: pct, resetAtMs: resetMs,
+                                  used: used, limit: limit > 0 ? limit : nil))
+        }
+        if let od = resp.individualUsage?.onDemand, od.enabled == true {
+            let used = od.used ?? 0
+            let limit = od.limit ?? 0
+            let pct = limit > 0 ? (used / limit) * 100 : 0
+            windows.append(window(label: "On-demand", usedPercent: pct, resetAtMs: resetMs,
+                                  used: used, limit: limit > 0 ? limit : nil))
+        }
+        return Provider(provider: "cursor", displayName: "Cursor", plan: plan, error: nil, windows: windows)
+    } catch {
+        return Provider(provider: "cursor", displayName: "Cursor", plan: nil, error: error.localizedDescription, windows: [])
+    }
+}
+
+// MARK: - UI
+
+final class UsageBarView: NSView {
+    private let usedFraction: CGFloat
+    private let color: NSColor
+
+    init(usedFraction: CGFloat, color: NSColor) {
+        self.usedFraction = max(0, min(1, usedFraction))
+        self.color = color
+        super.init(frame: .zero)
+    }
+
+    required init?(coder: NSCoder) { fatalError() }
+
+    override var intrinsicContentSize: NSSize { NSSize(width: NSView.noIntrinsicMetric, height: 3) }
+
+    override func draw(_ dirtyRect: NSRect) {
+        NSColor.separatorColor.withAlphaComponent(0.25).setFill()
+        NSBezierPath(roundedRect: bounds, xRadius: 1.5, yRadius: 1.5).fill()
+        let fillWidth = bounds.width * usedFraction
+        guard fillWidth > 0 else { return }
+        color.setFill()
+        NSBezierPath(roundedRect: NSRect(x: 0, y: 0, width: fillWidth, height: bounds.height), xRadius: 1.5, yRadius: 1.5).fill()
+    }
 }
 
 final class OverlayView: NSView {
@@ -62,11 +444,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         static let showUsageFraction = "MeterShowUsageFraction"
         static let showResetCountdown = "MeterShowResetCountdown"
         static let opaqueBackground = "MeterOpaqueBackground"
-        // per-provider enabled
         static let enableClaude = "MeterEnableClaude"
         static let enableCursor = "MeterEnableCursor"
         static let enableCodex = "MeterEnableCodex"
-        // provider-specific display
         static let showCursorOnDemand = "MeterShowCursorOnDemand"
         static let hideCodex5hLabel = "MeterHideCodex5hLabel"
         static let abbreviateCodexWeek = "MeterAbbreviateCodexWeek"
@@ -233,7 +613,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(refreshItem)
         menu.addItem(.separator())
 
-        // Display
         menu.addItem(toggleItem("Flash on Refresh", action: #selector(toggleFlashOnRefresh), state: flashOnRefresh))
         menu.addItem(toggleItem("Opaque Background", action: #selector(toggleOpaqueBackground), state: opaqueBackground))
         menu.addItem(.separator())
@@ -243,7 +622,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(toggleItem("Show Reset Countdown", action: #selector(toggleShowResetCountdown), state: showResetCountdown))
         menu.addItem(.separator())
 
-        // Providers submenu
         let providersItem = NSMenuItem(title: "Providers", action: nil, keyEquivalent: "")
         let providersMenu = NSMenu()
 
@@ -268,7 +646,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(providersItem)
         menu.addItem(.separator())
 
-        // Refresh interval submenu
         let intervalItem = NSMenuItem(title: "Refresh Interval", action: nil, keyEquivalent: "")
         let intervalMenu = NSMenu()
         [15, 30, 60, 120].forEach { seconds in
@@ -376,35 +753,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func loadState() -> Result<UsageState, Error> {
-        do {
-            let process = Process()
-            // `usage-hud` is `#!/usr/bin/env node`. GUI launches (Finder, open -a) get a
-            // minimal PATH, so `env` never finds `node` and the script exits 127. A login
-            // shell loads the usual profile and restores Homebrew / nvm / etc.
-            process.executableURL = URL(fileURLWithPath: "/bin/zsh")
-            process.arguments = ["-lc", "\(meterCommand) --json"]
+        var codex: Provider?
+        var claude: Provider?
+        var cursor: Provider?
+        let group = DispatchGroup()
 
-            let output = Pipe()
-            let error = Pipe()
-            process.standardOutput = output
-            process.standardError = error
+        group.enter()
+        DispatchQueue.global().async { codex = fetchCodex(); group.leave() }
+        group.enter()
+        DispatchQueue.global().async { claude = fetchClaude(); group.leave() }
+        group.enter()
+        DispatchQueue.global().async { cursor = fetchCursor(); group.leave() }
+        group.wait()
 
-            try process.run()
-            process.waitUntilExit()
-
-            let data = output.fileHandleForReading.readDataToEndOfFile()
-            if process.terminationStatus != 0 {
-                let errorData = error.fileHandleForReading.readDataToEndOfFile()
-                let message = String(data: errorData, encoding: .utf8) ?? "usage-hud failed"
-                throw NSError(domain: "Meter", code: Int(process.terminationStatus), userInfo: [
-                    NSLocalizedDescriptionKey: message.trimmingCharacters(in: .whitespacesAndNewlines),
-                ])
-            }
-
-            return .success(try JSONDecoder().decode(UsageState.self, from: data))
-        } catch {
-            return .failure(error)
-        }
+        let providers = [codex, claude, cursor].compactMap { $0 }
+        return .success(UsageState(providers: providers))
     }
 
     private func render(_ result: Result<UsageState, Error>) {
@@ -415,14 +778,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         switch result {
         case .success(let state):
-            let providers = mergedProviders(from: state)
-            lastSuccessfulState = UsageState(providers: providers.filter { !$0.windows.isEmpty })
+            let merge = mergedProviders(from: state)
+            let providers = merge.providers
+            lastSuccessfulState = updatedSuccessfulState(from: state)
             let visible = providers.filter { isEnabled($0.provider) }
             for provider in visible {
                 stack.addArrangedSubview(row(for: provider))
             }
             if visible.isEmpty {
                 stack.addArrangedSubview(textLabel("All providers disabled", size: 12, color: .secondaryLabelColor))
+            } else if visible.contains(where: { merge.staleProviderIds.contains($0.provider) }) {
+                stack.addArrangedSubview(staleFooter())
             }
         case .failure:
             if let stale = lastSuccessfulState {
@@ -440,12 +806,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         flashUpdate()
     }
 
-    private func mergedProviders(from state: UsageState) -> [Provider] {
+    private func mergedProviders(from state: UsageState) -> (providers: [Provider], staleProviderIds: Set<String>) {
         guard let staleProviders = lastSuccessfulState?.providers, !staleProviders.isEmpty else {
-            return state.providers
+            return (state.providers, [])
         }
 
         var merged: [Provider] = []
+        var staleProviderIds: Set<String> = []
         let freshByProvider = providersById(state.providers)
         let staleByProvider = providersById(staleProviders)
         let orderedProviderIds = state.providers.map(\.provider) + staleProviders.map(\.provider).filter { freshByProvider[$0] == nil }
@@ -458,19 +825,34 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 merged.append(fresh)
             } else if let stale, !stale.windows.isEmpty {
                 merged.append(stale)
+                staleProviderIds.insert(providerId)
             } else if let fresh {
                 merged.append(fresh)
             }
         }
 
-        return merged
+        return (merged, staleProviderIds)
+    }
+
+    private func updatedSuccessfulState(from state: UsageState) -> UsageState {
+        guard let previous = lastSuccessfulState?.providers, !previous.isEmpty else {
+            return UsageState(providers: state.providers.filter { !$0.windows.isEmpty })
+        }
+
+        var byId = providersById(previous)
+        for provider in state.providers where !provider.windows.isEmpty {
+            byId[provider.provider] = provider
+        }
+
+        let freshIds = Set(state.providers.map(\.provider))
+        let orderedProviderIds = state.providers.map(\.provider) + previous.map(\.provider).filter { !freshIds.contains($0) }
+        let providers = orderedProviderIds.compactMap { byId[$0] }.filter { !$0.windows.isEmpty }
+        return UsageState(providers: providers)
     }
 
     private func providersById(_ providers: [Provider]) -> [String: Provider] {
         var byId: [String: Provider] = [:]
-        for provider in providers {
-            byId[provider.provider] = provider
-        }
+        for provider in providers { byId[provider.provider] = provider }
         return byId
     }
 
@@ -479,10 +861,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         row.orientation = .horizontal
         row.alignment = .centerY
         row.spacing = 4
-        let icon = textLabel("⏱", size: 9, color: .tertiaryLabelColor)
-        let label = textLabel("stale", size: 9, color: .tertiaryLabelColor)
-        row.addArrangedSubview(icon)
-        row.addArrangedSubview(label)
+        row.addArrangedSubview(textLabel("⏱", size: 9, color: .tertiaryLabelColor))
+        row.addArrangedSubview(textLabel("stale", size: 9, color: .tertiaryLabelColor))
         return row
     }
 
@@ -507,8 +887,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         row.translatesAutoresizingMaskIntoConstraints = false
 
         if showProviderIcon {
-            let icon = logoView(for: provider.provider)
-            row.addArrangedSubview(icon)
+            row.addArrangedSubview(logoView(for: provider.provider))
         }
 
         let copy = NSStackView()
@@ -520,17 +899,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             copy.addArrangedSubview(textLabel(provider.displayName, size: 12, weight: .semibold))
         }
 
-        let visibleWindows = provider.windows.filter { window in
-            if provider.provider == "cursor", window.label == "On-demand", !showCursorOnDemand {
-                return false
-            }
-            return true
+        let visibleWindows = provider.windows.filter { w in
+            !(provider.provider == "cursor" && w.label == "On-demand" && !showCursorOnDemand)
         }
 
         if visibleWindows.isEmpty {
             copy.addArrangedSubview(textLabel(provider.error ?? "No data", size: 11, color: .secondaryLabelColor))
         } else {
-            copy.addArrangedSubview(summaryField(for: visibleWindows, provider: provider))
+            let summary = summaryField(for: visibleWindows, provider: provider)
+            copy.addArrangedSubview(summary)
+            copy.setCustomSpacing(4, after: summary)
+            for w in visibleWindows {
+                let bar = UsageBarView(
+                    usedFraction: CGFloat(1 - w.leftPercent / 100),
+                    color: accentColor(forLeftPercent: w.leftPercent)
+                )
+                bar.translatesAutoresizingMaskIntoConstraints = false
+                copy.addArrangedSubview(bar)
+                bar.widthAnchor.constraint(equalTo: copy.widthAnchor).isActive = true
+                copy.setCustomSpacing(2, after: bar)
+            }
         }
 
         row.addArrangedSubview(copy)
@@ -539,7 +927,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private let summaryLineFontSize: CGFloat = 11
 
-    /// Under 10%: red; under 20%: orange; otherwise full label color for readability.
     private func accentColor(forLeftPercent p: Double) -> NSColor {
         if p < 10 { return .systemRed }
         if p < 20 { return .systemOrange }
@@ -550,30 +937,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         [.font: font, .foregroundColor: NSColor.secondaryLabelColor]
     }
 
-    /// Codex multi-window: omit the short-window label ("5h"); show weekly bucket as `W`.
-    private func codexWindowAttributed(_ window: UsageWindow, font: NSFont, muted: [NSAttributedString.Key: Any]) -> NSAttributedString {
-        let pct = Int(window.leftPercent.rounded())
-        let pctStr = "\(pct)%"
-        let dur = durationText(for: window)
-        let raw = window.label.trimmingCharacters(in: .whitespacesAndNewlines)
+    private func codexWindowAttributed(_ w: UsageWindow, font: NSFont, muted: [NSAttributedString.Key: Any]) -> NSAttributedString {
+        let pct = Int((100 - w.leftPercent).rounded())
+        let raw = w.label.trimmingCharacters(in: .whitespacesAndNewlines)
         let isShort = hideCodex5hLabel && raw.caseInsensitiveCompare("5h") == .orderedSame
-        let prefixStr: String = {
+        let prefix: String = {
             if isShort { return "" }
             if abbreviateCodexWeek, raw.caseInsensitiveCompare("week") == .orderedSame { return "W " }
             return raw.isEmpty ? "" : "\(raw) "
         }()
 
         let out = NSMutableAttributedString()
-        if !prefixStr.isEmpty {
-            out.append(NSAttributedString(string: prefixStr, attributes: muted))
+        if !prefix.isEmpty {
+            out.append(NSAttributedString(string: prefix, attributes: muted))
         }
-        let pctAttrs: [NSAttributedString.Key: Any] = [
+        out.append(NSAttributedString(string: "\(pct)%", attributes: [
             .font: font,
-            .foregroundColor: accentColor(forLeftPercent: window.leftPercent),
-        ]
-        out.append(NSAttributedString(string: pctStr, attributes: pctAttrs))
+            .foregroundColor: accentColor(forLeftPercent: w.leftPercent),
+        ]))
         if showResetCountdown {
-            out.append(NSAttributedString(string: " \(dur)", attributes: muted))
+            out.append(NSAttributedString(string: " \(durationText(for: w))", attributes: muted))
         }
         return out
     }
@@ -590,23 +973,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 }
                 return result
             }
-            guard let usageWindow = windows.first else {
+            guard let w = windows.first else {
                 return NSAttributedString(string: provider.error ?? "No data", attributes: muted)
             }
-            let pctStr = "\(Int(usageWindow.leftPercent.rounded()))%"
             let out = NSMutableAttributedString()
-            out.append(NSAttributedString(
-                string: pctStr,
-                attributes: [
-                    .font: font,
-                    .foregroundColor: accentColor(forLeftPercent: usageWindow.leftPercent),
-                ]
-            ))
-            if showUsageFraction, let used = usageWindow.used, let limit = usageWindow.limit {
+            out.append(NSAttributedString(string: "\(Int((100 - w.leftPercent).rounded()))%", attributes: [
+                .font: font,
+                .foregroundColor: accentColor(forLeftPercent: w.leftPercent),
+            ]))
+            if showUsageFraction, let used = w.used, let limit = w.limit {
                 out.append(NSAttributedString(string: "  \(Int(used))/\(Int(limit))", attributes: muted))
             }
             if showResetCountdown {
-                out.append(NSAttributedString(string: "  \(durationText(for: usageWindow))", attributes: muted))
+                out.append(NSAttributedString(string: "  \(durationText(for: w))", attributes: muted))
             }
             return out
         }()
@@ -620,10 +999,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         return label
     }
 
-    private func durationText(for usageWindow: UsageWindow) -> String {
-        guard let resetAt = usageWindow.resetAt else {
-            return "unknown"
-        }
+    private func durationText(for w: UsageWindow) -> String {
+        guard let resetAt = w.resetAt else { return "unknown" }
         return formatDuration(until: resetAt)
     }
 
@@ -644,8 +1021,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func logoImage(for provider: String) -> NSImage? {
-        for logoPath in logoPaths[provider] ?? [] {
-            if let image = NSImage(contentsOfFile: logoPath) {
+        for path in logoPaths[provider] ?? [] {
+            if let image = NSImage(contentsOfFile: path) {
                 image.isTemplate = provider == "codex"
                 return image
             }
@@ -682,12 +1059,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let hours = (seconds % 86_400) / 3_600
         let minutes = (seconds % 3_600) / 60
 
-        if days > 0 {
-            return "\(days)d \(hours)h"
-        }
-        if hours > 0 {
-            return "\(hours)h \(minutes)m"
-        }
+        if days > 0 { return "\(days)d \(hours)h" }
+        if hours > 0 { return "\(hours)h \(minutes)m" }
         return "\(minutes)m"
     }
 

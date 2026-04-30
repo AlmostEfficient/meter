@@ -12,6 +12,5 @@ if [[ ! -x "$bin" || "$src" -nt "$bin" ]]; then
 fi
 
 export METER_ROOT="$script_dir"
-export METER_COMMAND="${METER_COMMAND:-usage-hud}"
 
 exec "$bin"
