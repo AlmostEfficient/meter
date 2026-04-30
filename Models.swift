@@ -17,6 +17,12 @@ let logoPaths = [
         "/Applications/Cursor.app/Contents/Resources/Cursor.icns",
         "\(overlayRoot)/assets/cursor.png",
     ],
+    "crof": [
+        "\(overlayRoot)/assets/crof.png",
+    ],
+    "openrouter": [
+        "\(overlayRoot)/assets/openrouter.png",
+    ],
 ]
 
 struct UsageState {

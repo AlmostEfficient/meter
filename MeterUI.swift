@@ -49,6 +49,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         static let enableClaude = "MeterEnableClaude"
         static let enableCursor = "MeterEnableCursor"
         static let enableCodex = "MeterEnableCodex"
+        static let enableCrof = "MeterEnableCrof"
+        static let enableOpenRouter = "MeterEnableOpenRouter"
         static let showCursorOnDemand = "MeterShowCursorOnDemand"
         static let hideCodex5hLabel = "MeterHideCodex5hLabel"
         static let abbreviateCodexWeek = "MeterAbbreviateCodexWeek"
@@ -69,6 +71,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var enableClaude = true
     private var enableCursor = true
     private var enableCodex = true
+    private var enableCrof = true
+    private var enableOpenRouter = false
     private var showCursorOnDemand = false
     private var hideCodex5hLabel = true
     private var abbreviateCodexWeek = true
@@ -115,7 +119,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         stack.orientation = .vertical
         stack.alignment = .leading
         stack.spacing = 10
-        stack.edgeInsets = NSEdgeInsets(top: 12, left: 14, bottom: 12, right: 14)
+        stack.edgeInsets = NSEdgeInsets(top: 12, left: 14, bottom: 18, right: 14)
         stack.translatesAutoresizingMaskIntoConstraints = false
         content.addSubview(stack)
 
@@ -172,8 +176,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             SettingKey.showResetCountdown: true,
             SettingKey.opaqueBackground: true,
             SettingKey.enableClaude: true,
-            SettingKey.enableCursor: true,
+            SettingKey.enableCursor: false,
             SettingKey.enableCodex: true,
+            SettingKey.enableCrof: false,
+            SettingKey.enableOpenRouter: false,
             SettingKey.showCursorOnDemand: false,
             SettingKey.hideCodex5hLabel: true,
             SettingKey.abbreviateCodexWeek: true,
@@ -189,6 +195,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         enableClaude = defaults.bool(forKey: SettingKey.enableClaude)
         enableCursor = defaults.bool(forKey: SettingKey.enableCursor)
         enableCodex = defaults.bool(forKey: SettingKey.enableCodex)
+        enableCrof = defaults.bool(forKey: SettingKey.enableCrof)
+        enableOpenRouter = defaults.bool(forKey: SettingKey.enableOpenRouter)
         showCursorOnDemand = defaults.bool(forKey: SettingKey.showCursorOnDemand)
         hideCodex5hLabel = defaults.bool(forKey: SettingKey.hideCodex5hLabel)
         abbreviateCodexWeek = defaults.bool(forKey: SettingKey.abbreviateCodexWeek)
@@ -211,6 +219,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         case "claude": return enableClaude
         case "cursor": return enableCursor
         case "codex": return enableCodex
+        case "crof": return enableCrof
+        case "openrouter": return enableOpenRouter
         default: return true
         }
     }
@@ -260,6 +270,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let hide5h = toggleItem("  Hide 5h Label", action: #selector(toggleHideCodex5hLabel), state: hideCodex5hLabel)
         hide5h.isEnabled = enableCodex
         providersMenu.addItem(hide5h)
+        providersMenu.addItem(.separator())
+        providersMenu.addItem(toggleItem("Crof", action: #selector(toggleEnableCrof), state: enableCrof))
+        providersMenu.addItem(toggleItem("OpenRouter", action: #selector(toggleEnableOpenRouter), state: enableOpenRouter))
 
         providersItem.submenu = providersMenu
         menu.addItem(providersItem)
@@ -345,6 +358,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         refreshNow()
     }
 
+    @objc private func toggleEnableCrof() {
+        enableCrof.toggle()
+        defaults.set(enableCrof, forKey: SettingKey.enableCrof)
+        refreshNow()
+    }
+
+    @objc private func toggleEnableOpenRouter() {
+        enableOpenRouter.toggle()
+        defaults.set(enableOpenRouter, forKey: SettingKey.enableOpenRouter)
+        refreshNow()
+    }
+
     @objc private func toggleShowCursorOnDemand() {
         showCursorOnDemand.toggle()
         defaults.set(showCursorOnDemand, forKey: SettingKey.showCursorOnDemand)
@@ -375,6 +400,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         var codex: Provider?
         var claude: Provider?
         var cursor: Provider?
+        var crof: Provider?
+        var openRouter: Provider?
         let group = DispatchGroup()
 
         group.enter()
@@ -383,9 +410,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         DispatchQueue.global().async { claude = fetchClaude(); group.leave() }
         group.enter()
         DispatchQueue.global().async { cursor = fetchCursor(); group.leave() }
+        group.enter()
+        DispatchQueue.global().async { crof = fetchCrof(); group.leave() }
+        group.enter()
+        DispatchQueue.global().async { openRouter = fetchOpenRouter(); group.leave() }
         group.wait()
 
-        let providers = [codex, claude, cursor].compactMap { $0 }
+        let providers = [codex, claude, cursor, crof, openRouter].compactMap { $0 }
         return .success(UsageState(providers: providers))
     }
 
@@ -543,27 +574,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         } else {
             let summary = summaryField(for: visibleWindows, provider: provider)
             copy.addArrangedSubview(summary)
-            copy.setCustomSpacing(4, after: summary)
-            let barWindows = provider.provider == "codex" ? Array(visibleWindows.prefix(1)) : visibleWindows
-            let barContainer = NSView()
-            barContainer.translatesAutoresizingMaskIntoConstraints = false
-            copy.addArrangedSubview(barContainer)
-            for w in barWindows {
-                let bar = UsageBarView(
-                    usedFraction: CGFloat(1 - w.leftPercent / 100),
-                    color: accentColor(forLeftPercent: w.leftPercent)
-                )
-                bar.translatesAutoresizingMaskIntoConstraints = false
-                barContainer.addSubview(bar)
-                NSLayoutConstraint.activate([
-                    bar.leadingAnchor.constraint(equalTo: barContainer.leadingAnchor),
-                    bar.trailingAnchor.constraint(equalTo: barContainer.trailingAnchor),
-                    bar.topAnchor.constraint(equalTo: barContainer.topAnchor),
-                    bar.bottomAnchor.constraint(equalTo: barContainer.bottomAnchor),
-                ])
+            let barWindows: [UsageWindow] = provider.provider == "openrouter" ? [] : provider.provider == "codex" ? Array(visibleWindows.prefix(1)) : visibleWindows
+            if !barWindows.isEmpty {
+                copy.setCustomSpacing(4, after: summary)
+                let barContainer = NSView()
+                barContainer.translatesAutoresizingMaskIntoConstraints = false
+                copy.addArrangedSubview(barContainer)
+                for w in barWindows {
+                    let bar = UsageBarView(
+                        usedFraction: CGFloat(1 - w.leftPercent / 100),
+                        color: accentColor(forLeftPercent: w.leftPercent)
+                    )
+                    bar.translatesAutoresizingMaskIntoConstraints = false
+                    barContainer.addSubview(bar)
+                    NSLayoutConstraint.activate([
+                        bar.leadingAnchor.constraint(equalTo: barContainer.leadingAnchor),
+                        bar.trailingAnchor.constraint(equalTo: barContainer.trailingAnchor),
+                        bar.topAnchor.constraint(equalTo: barContainer.topAnchor),
+                        bar.bottomAnchor.constraint(equalTo: barContainer.bottomAnchor),
+                    ])
+                }
+                barContainer.widthAnchor.constraint(equalToConstant: providerBarWidth()).isActive = true
+                copy.setCustomSpacing(2, after: barContainer)
             }
-            barContainer.widthAnchor.constraint(equalToConstant: providerBarWidth()).isActive = true
-            copy.setCustomSpacing(2, after: barContainer)
         }
 
         row.addArrangedSubview(copy)
@@ -608,8 +641,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             .font: font,
             .foregroundColor: accentColor(forLeftPercent: w.leftPercent),
         ]))
-        if showResetCountdown {
-            out.append(NSAttributedString(string: " \(durationText(for: w))", attributes: muted))
+        if showResetCountdown, let dur = durationText(for: w) {
+            out.append(NSAttributedString(string: " \(dur)", attributes: muted))
         }
         return out
     }
@@ -618,6 +651,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let font = NSFont.systemFont(ofSize: summaryLineFontSize, weight: .regular)
         let muted = summaryMutedAttributes(font: font)
         let attr: NSAttributedString = {
+            if provider.provider == "openrouter", let w = windows.first, let remaining = w.used {
+                let formatted = String(format: "$%.2f", remaining)
+                return NSAttributedString(string: formatted, attributes: [.font: font, .foregroundColor: accentColor(forLeftPercent: w.leftPercent)])
+            }
             if provider.provider == "codex", windows.count > 1 {
                 let result = NSMutableAttributedString()
                 for (i, w) in windows.enumerated() {
@@ -637,8 +674,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             if showUsageFraction, let used = w.used, let limit = w.limit {
                 out.append(NSAttributedString(string: "  \(Int(used))/\(Int(limit))", attributes: muted))
             }
-            if showResetCountdown {
-                out.append(NSAttributedString(string: "  \(durationText(for: w))", attributes: muted))
+            if showResetCountdown, let dur = durationText(for: w) {
+                out.append(NSAttributedString(string: "  \(dur)", attributes: muted))
             }
             return out
         }()
@@ -652,8 +689,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         return label
     }
 
-    private func durationText(for w: UsageWindow) -> String {
-        guard let resetAt = w.resetAt else { return "unknown" }
+    private func durationText(for w: UsageWindow) -> String? {
+        guard let resetAt = w.resetAt else { return nil }
         return formatDuration(until: resetAt)
     }
 
@@ -702,6 +739,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         case "codex": return ">"
         case "claude": return "✳"
         case "cursor": return "⌬"
+        case "crof": return "⚡"
+        case "openrouter": return "◈"
         default: return "•"
         }
     }

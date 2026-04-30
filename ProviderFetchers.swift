@@ -1,5 +1,34 @@
 import Foundation
 
+private func nextDailyResetMs(hour: Int) -> Double {
+    var cal = Calendar(identifier: .gregorian)
+    cal.timeZone = TimeZone(identifier: "UTC")!
+    var comps = cal.dateComponents([.year, .month, .day], from: Date())
+    comps.hour = hour; comps.minute = 0; comps.second = 0
+    var date = cal.date(from: comps)!
+    if date <= Date() { date = cal.date(byAdding: .day, value: 1, to: date)! }
+    return date.timeIntervalSince1970 * 1000
+}
+
+private func readKeychainPassword(service: String, account: String) -> String? {
+    let proc = Process()
+    proc.executableURL = URL(fileURLWithPath: "/usr/bin/security")
+    proc.arguments = ["find-generic-password", "-s", service, "-a", account, "-w"]
+    let pipe = Pipe()
+    proc.standardOutput = pipe
+    proc.standardError = Pipe()
+    if (try? proc.run()) != nil {
+        proc.waitUntilExit()
+        if proc.terminationStatus == 0,
+           let raw = String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8)?
+               .trimmingCharacters(in: .whitespacesAndNewlines),
+           !raw.isEmpty {
+            return raw
+        }
+    }
+    return nil
+}
+
 // MARK: - Claude
 
 private struct ClaudeCredFile: Decodable {
@@ -263,13 +292,13 @@ private struct CursorUsageResponse: Decodable {
 
 func fetchCursor() -> Provider {
     let cookiePath = FileManager.default.homeDirectoryForCurrentUser
-        .appendingPathComponent(".config/usage-hud/cursor-cookie")
+        .appendingPathComponent(".config/meter/cursor-cookie")
     let cookie = environment["CURSOR_COOKIE"]
         ?? (try? String(contentsOf: cookiePath, encoding: .utf8))?.trimmingCharacters(in: .whitespacesAndNewlines)
 
     guard let cookie, !cookie.isEmpty else {
         return Provider(provider: "cursor", displayName: "Cursor", plan: nil,
-                        error: "No cookie — save to ~/.config/usage-hud/cursor-cookie", windows: [])
+                        error: "No cookie — save to ~/.config/meter/cursor-cookie or set CURSOR_COOKIE env var", windows: [])
     }
 
     do {
@@ -307,5 +336,102 @@ func fetchCursor() -> Provider {
         return Provider(provider: "cursor", displayName: "Cursor", plan: plan, error: nil, windows: windows)
     } catch {
         return Provider(provider: "cursor", displayName: "Cursor", plan: nil, error: error.localizedDescription, windows: [])
+    }
+}
+
+// MARK: - Crof
+
+private struct CrofUsageResponse: Decodable {
+    let usableRequests: Int?
+    let credits: Double?
+    enum CodingKeys: String, CodingKey {
+        case usableRequests = "usable_requests"
+        case credits
+    }
+}
+
+func fetchCrof() -> Provider {
+    let sessionPath = FileManager.default.homeDirectoryForCurrentUser
+        .appendingPathComponent(".config/meter/crof")
+    let keychainSession = readKeychainPassword(service: "Crof-credentials", account: "crof")
+    let session = keychainSession
+        ?? environment["CROF_SESSION"]
+        ?? environment["CROF_API_KEY"]
+        ?? (try? String(contentsOf: sessionPath, encoding: .utf8))?.trimmingCharacters(in: .whitespacesAndNewlines)
+
+    guard let session, !session.isEmpty else {
+        return Provider(provider: "crof", displayName: "Crof", plan: nil,
+                         error: "No session — set CROF_SESSION or save to ~/.config/meter/crof", windows: [])
+    }
+
+    do {
+        let data = try syncFetch(
+            url: URL(string: "https://crof.ai/usage_api/")!,
+            headers: [
+                "Authorization": "Bearer \(session)",
+                "Accept": "application/json",
+                "Referer": "https://crof.ai/dashboard",
+                "User-Agent": "Meter",
+            ]
+        )
+        let resp = try JSONDecoder().decode(CrofUsageResponse.self, from: data)
+
+        var windows: [UsageWindow] = []
+        if let remaining = resp.usableRequests {
+            let limit = 500.0
+            let leftPct = Double(remaining) / 500.0 * 100.0
+            windows.append(UsageWindow(label: "Requests", leftPercent: leftPct, resetAt: nextDailyResetMs(hour: 5), used: limit - Double(remaining), limit: limit))
+        }
+        return Provider(provider: "crof", displayName: "Crof", plan: "hobby", error: nil, windows: windows)
+    } catch {
+        return Provider(provider: "crof", displayName: "Crof", plan: nil, error: error.localizedDescription, windows: [])
+    }
+}
+
+// MARK: - OpenRouter
+
+private struct OpenRouterCreditsResponse: Decodable {
+    struct Data: Decodable {
+        let totalCredits: Double?
+        let totalUsage: Double?
+        enum CodingKeys: String, CodingKey {
+            case totalCredits = "total_credits"
+            case totalUsage = "total_usage"
+        }
+    }
+    let data: Data?
+}
+
+func fetchOpenRouter() -> Provider {
+    let keyPath = FileManager.default.homeDirectoryForCurrentUser
+        .appendingPathComponent(".config/meter/openrouter")
+    let apiKey = environment["OPENROUTER_API_KEY"]
+        ?? (try? String(contentsOf: keyPath, encoding: .utf8))?.trimmingCharacters(in: .whitespacesAndNewlines)
+
+    guard let apiKey, !apiKey.isEmpty else {
+        return Provider(provider: "openrouter", displayName: "OpenRouter", plan: nil,
+                        error: "No key — set OPENROUTER_API_KEY or save to ~/.config/meter/openrouter", windows: [])
+    }
+
+    do {
+        let data = try syncFetch(
+            url: URL(string: "https://openrouter.ai/api/v1/credits")!,
+            headers: [
+                "Authorization": "Bearer \(apiKey)",
+                "Accept": "application/json",
+                "User-Agent": "Meter",
+            ]
+        )
+        let resp = try JSONDecoder().decode(OpenRouterCreditsResponse.self, from: data)
+        guard let total = resp.data?.totalCredits, let usage = resp.data?.totalUsage, total > 0 else {
+            return Provider(provider: "openrouter", displayName: "OpenRouter", plan: nil, error: "No data", windows: [])
+        }
+        let remaining = total - usage
+        let usedPct = (usage / total) * 100
+        let w = UsageWindow(label: "Credits", leftPercent: clampPercent(100 - usedPct), resetAt: nil,
+                            used: (remaining * 100).rounded() / 100, limit: (total * 100).rounded() / 100)
+        return Provider(provider: "openrouter", displayName: "OpenRouter", plan: nil, error: nil, windows: [w])
+    } catch {
+        return Provider(provider: "openrouter", displayName: "OpenRouter", plan: nil, error: error.localizedDescription, windows: [])
     }
 }
