@@ -1,5 +1,8 @@
 # Meter
 
+<img width="265" height="148" alt="image" src="https://github.com/user-attachments/assets/12060c29-3808-4fb2-84b7-673dab730217" />
+
+
 Small macOS overlay that renders `usage-hud --json` output in a floating panel.
 
 ## Requirements
