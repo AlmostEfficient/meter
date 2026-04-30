@@ -1,6 +1,8 @@
 # Meter
 
-<img width="265" height="148" alt="image" src="https://github.com/user-attachments/assets/12060c29-3808-4fb2-84b7-673dab730217" />
+  
+<img width="272" height="358" alt="image" src="https://github.com/user-attachments/assets/2838d8d4-a398-4490-9a16-29f7d9e9d2e1" />
+  
 
 Floating macOS overlay showing AI tool usage. Also ships a CLI. Self-contained — no external dependencies beyond `swiftc` and `node`.
 
@@ -37,13 +39,13 @@ launchctl stop com.$(whoami).meter && launchctl start com.$(whoami).meter
 
 | Provider | Default on | Auth |
 |---|---|---|
-| Codex | ✓ | `~/.codex/auth.json` |
-| Claude | ✓ | Keychain / `~/.claude.json` |
-| Cursor | — | `~/.config/meter/cursor-cookie` or `$CURSOR_COOKIE` |
+| Codex Plus/Pro | ✓ | `~/.codex/auth.json` |
+| Claude Pro/Max | ✓ | Keychain / `~/.claude.json` |
+| Cursor Pro/Ultra | — | `~/.config/meter/cursor-cookie` or `$CURSOR_COOKIE` |
 | Crof | — | `~/.config/meter/crof` or `$CROF_SESSION` |
 | OpenRouter | — | `~/.config/meter/openrouter` or `$OPENROUTER_API_KEY` |
-| OpenAI | — | `~/.config/meter/openai` or `$OPENAI_ADMIN_KEY` or Keychain |
-| Anthropic | — | Keychain (preferred) or `~/.config/meter/anthropic` or `$ANTHROPIC_ADMIN_KEY` |
+| OpenAI (API) | — | `~/.config/meter/openai` or `$OPENAI_ADMIN_KEY` or Keychain |
+| Anthropic (API) | — | Keychain (preferred) or `~/.config/meter/anthropic` or `$ANTHROPIC_ADMIN_KEY` |
 
 ### OpenAI & Anthropic admin keys
 
