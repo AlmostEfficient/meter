@@ -462,11 +462,11 @@ private func nowISO() -> String {
 
 private struct OpenAICostsResponse: Decodable {
     struct Bucket: Decodable {
-        let result: [CostResult]?
+        let results: [CostResult]?
     }
     struct CostResult: Decodable {
         struct Amount: Decodable {
-            let value: Double?
+            let value: String?
         }
         let amount: Amount?
     }
@@ -499,8 +499,8 @@ func fetchOpenAI() -> Provider {
             timeoutInterval: 15
         )
         let resp = try JSONDecoder().decode(OpenAICostsResponse.self, from: data)
-        let results = resp.data?.flatMap { $0.result ?? [] } ?? []
-        let total = results.compactMap { $0.amount?.value }.reduce(0.0, +)
+        let results = resp.data?.flatMap { $0.results ?? [] } ?? []
+        let total = results.compactMap { Double($0.amount?.value ?? "") }.reduce(0.0, +)
         let w = UsageWindow(label: "Month", leftPercent: 0, resetAt: nil,
                             used: (total * 100).rounded() / 100, limit: nil)
         return Provider(provider: "openai", displayName: "OpenAI", plan: nil, error: nil, windows: [w])

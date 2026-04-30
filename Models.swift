@@ -97,3 +97,19 @@ func titleCase(_ s: String) -> String {
 func window(label: String, usedPercent: Double, resetAtMs: Double?, used: Double? = nil, limit: Double? = nil) -> UsageWindow {
     UsageWindow(label: label, leftPercent: clampPercent(100 - clampPercent(usedPercent)), resetAt: resetAtMs, used: used, limit: limit)
 }
+
+// MARK: - Provider URLs
+
+let providerURLs: [String: URL] = [
+    "codex": URL(string: "https://chatgpt.com/codex/cloud/settings/analytics")!,
+    "claude": URL(string: "https://claude.ai/settings/usage")!,
+    "cursor": URL(string: "https://cursor.com/dashboard/usage")!,
+    "crof": URL(string: "https://crof.ai/dashboard")!,
+    "openrouter": URL(string: "https://openrouter.ai/settings/credits")!,
+    "openai": URL(string: "https://platform.openai.com/settings/organization/billing/overview")!,
+    "anthropic": URL(string: "https://platform.claude.com/settings/billing")!
+]
+
+func urlForProvider(_ providerID: String) -> URL? {
+    return providerURLs[providerID]
+}

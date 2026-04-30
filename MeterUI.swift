@@ -37,6 +37,44 @@ final class OverlayView: NSView {
     }
 }
 
+// MARK: - Clickable Stack View
+
+final class ClickableStackView: NSStackView {
+    var onTap: (() -> Void)?
+
+    override func mouseDown(with event: NSEvent) {
+        super.mouseDown(with: event)
+        wantsLayer = true
+        CATransaction.begin()
+        CATransaction.setAnimationDuration(0.10)
+        CATransaction.setAnimationTimingFunction(CAMediaTimingFunction(name: .easeOut))
+        layer?.transform = CATransform3DMakeScale(0.96, 0.96, 1)
+        CATransaction.commit()
+    }
+
+    override func mouseUp(with event: NSEvent) {
+        super.mouseUp(with: event)
+        wantsLayer = true
+        let from = (layer?.presentation()?.value(forKeyPath: "transform.scale") as? CGFloat) ?? 0.96
+        let spring = CASpringAnimation(keyPath: "transform.scale")
+        spring.fromValue = from
+        spring.toValue = 1.0
+        spring.damping = 20
+        spring.stiffness = 380
+        spring.mass = 1
+        spring.initialVelocity = 0
+        spring.duration = spring.settlingDuration
+        layer?.add(spring, forKey: "scale")
+        layer?.transform = CATransform3DIdentity
+        let point = convert(event.locationInWindow, from: nil)
+        if bounds.contains(point) { onTap?() }
+    }
+
+    override func resetCursorRects() {
+        addCursorRect(bounds, cursor: .pointingHand)
+    }
+}
+
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private enum SettingKey {
         static let refreshInterval = "MeterRefreshInterval"
@@ -465,9 +503,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             lastSuccessfulState = successfulState
             saveDiskCache(successfulState)
             let visible = providers.filter { isEnabled($0.provider) }
-            for provider in visible {
+            for (i, provider) in visible.enumerated() {
                 let isStale = merge.staleProviderIds.contains(provider.provider)
-                addProviderRow(for: provider, isStale: isStale)
+                addProviderRow(for: provider, isStale: isStale, staggerIndex: i)
             }
             if visible.isEmpty {
                 stack.addArrangedSubview(textLabel("All providers disabled", size: 12, color: .secondaryLabelColor))
@@ -475,8 +513,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         case .failure:
             if let stale = lastSuccessfulState {
                 let visible = stale.providers.filter { isEnabled($0.provider) }
-                for provider in visible {
-                    addProviderRow(for: provider)
+                for (i, provider) in visible.enumerated() {
+                    addProviderRow(for: provider, staggerIndex: i)
                 }
                 stack.addArrangedSubview(staleFooter())
             } else {
@@ -488,9 +526,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         flashUpdate()
     }
 
-    private func addProviderRow(for provider: Provider, isStale: Bool = false) {
+    private func addProviderRow(for provider: Provider, isStale: Bool = false, staggerIndex: Int = 0) {
         let providerRow = row(for: provider, isStale: isStale)
+        providerRow.alphaValue = 0
         stack.addArrangedSubview(providerRow)
+        let delay = TimeInterval(staggerIndex) * 0.04
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak providerRow] in
+            guard let providerRow, providerRow.superview != nil else { return }
+            NSAnimationContext.runAnimationGroup { ctx in
+                ctx.duration = 0.18
+                ctx.timingFunction = CAMediaTimingFunction(name: .easeOut)
+                providerRow.animator().alphaValue = 1
+            }
+        }
     }
 
     private func mergedProviders(from state: UsageState) -> (providers: [Provider], staleProviderIds: Set<String>) {
@@ -548,7 +596,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         row.orientation = .horizontal
         row.alignment = .centerY
         row.spacing = 4
-        row.addArrangedSubview(textLabel("⏱", size: 9, color: .tertiaryLabelColor))
+        let clock = textLabel("⏱", size: 9, color: .tertiaryLabelColor)
+        clock.toolTip = "All fetches failed — showing last known data"
+        row.addArrangedSubview(clock)
         row.addArrangedSubview(textLabel("stale", size: 9, color: .tertiaryLabelColor))
         return row
     }
@@ -567,7 +617,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func row(for provider: Provider, isStale: Bool = false) -> NSView {
-        let row = NSStackView()
+        let row = ClickableStackView()
+        row.onTap = { if let url = urlForProvider(provider.provider) { NSWorkspace.shared.open(url) } }
         row.orientation = .horizontal
         row.alignment = .centerY
         row.spacing = 12
@@ -591,7 +642,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             nameRow.spacing = 4
             nameRow.addArrangedSubview(textLabel(provider.displayName, size: 12, weight: .semibold))
             if isStale {
-                nameRow.addArrangedSubview(textLabel("⏱", size: 9, color: .tertiaryLabelColor))
+                let clock = textLabel("⏱", size: 9, color: .tertiaryLabelColor)
+                clock.toolTip = "Live fetch failed — showing last known data"
+                nameRow.addArrangedSubview(clock)
             }
             copy.addArrangedSubview(nameRow)
         }
@@ -679,7 +732,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func summaryField(for windows: [UsageWindow], provider: Provider) -> NSTextField {
-        let font = NSFont.systemFont(ofSize: summaryLineFontSize, weight: .regular)
+        let font = NSFont.monospacedDigitSystemFont(ofSize: summaryLineFontSize, weight: .regular)
         let muted = summaryMutedAttributes(font: font)
         let attr: NSAttributedString = {
             if (provider.provider == "openrouter" || provider.provider == "openai" || provider.provider == "anthropic"), let w = windows.first, let cost = w.used {
