@@ -2,13 +2,13 @@
 
 <img width="265" height="148" alt="image" src="https://github.com/user-attachments/assets/12060c29-3808-4fb2-84b7-673dab730217" />
 
-
-Small macOS overlay that renders `usage-hud --json` output in a floating panel.
+Floating macOS overlay showing AI tool usage (Claude, Cursor, Codex) from `usage-hud`.
 
 ## Requirements
 
 - macOS
 - `swiftc` (Xcode Command Line Tools)
+- [`usage-hud`](https://github.com/nicholasgasior/usage-hud) on your PATH
 
 ## Run
 
@@ -16,20 +16,24 @@ Small macOS overlay that renders `usage-hud --json` output in a floating panel.
 ./meter.sh
 ```
 
+Compiles `Meter.swift` on first run (or when the source changes), then launches the overlay. The panel floats above all windows, persists across Spaces, and refreshes every 60 seconds.
+
+## Usage
+
+- **Drag** anywhere on the panel to reposition
+- **Right-click** for settings: refresh interval, display toggles, per-provider enable/disable
+
 ## Configuration
 
-You can override the `usage-hud` command without editing source:
+Override the backend command without editing source:
 
 ```bash
 METER_COMMAND="$HOME/.local/bin/usage-hud" ./meter.sh
 ```
 
-By default, the launcher exports:
+Settings are stored in `UserDefaults` under the `Meter*` key prefix and persist across restarts.
 
-- `METER_ROOT` (auto-detected from script location)
-- `METER_COMMAND` (`usage-hud` unless overridden)
-
-The app looks for local fallback icons in:
+Provider icons are loaded from the installed app bundle if present, falling back to:
 
 - `assets/codex.png`
 - `assets/claude.png`

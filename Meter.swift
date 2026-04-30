@@ -4,7 +4,7 @@ import AppKit
 import Foundation
 
 private let environment = ProcessInfo.processInfo.environment
-private let overlayRoot = environment["METER_ROOT"] ?? FileManager.default.currentDirectoryPath
+private let overlayRoot = URL(fileURLWithPath: #filePath).deletingLastPathComponent().path
 private let meterCommand = environment["METER_COMMAND"] ?? "usage-hud"
 private let logoPaths = [
     "codex": [
@@ -415,8 +415,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         switch result {
         case .success(let state):
-            lastSuccessfulState = state
-            let visible = state.providers.filter { isEnabled($0.provider) }
+            let providers = mergedProviders(from: state)
+            lastSuccessfulState = UsageState(providers: providers.filter { !$0.windows.isEmpty })
+            let visible = providers.filter { isEnabled($0.provider) }
             for provider in visible {
                 stack.addArrangedSubview(row(for: provider))
             }
@@ -437,6 +438,40 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         resizeToFit()
         flashUpdate()
+    }
+
+    private func mergedProviders(from state: UsageState) -> [Provider] {
+        guard let staleProviders = lastSuccessfulState?.providers, !staleProviders.isEmpty else {
+            return state.providers
+        }
+
+        var merged: [Provider] = []
+        let freshByProvider = providersById(state.providers)
+        let staleByProvider = providersById(staleProviders)
+        let orderedProviderIds = state.providers.map(\.provider) + staleProviders.map(\.provider).filter { freshByProvider[$0] == nil }
+
+        for providerId in orderedProviderIds {
+            let fresh = freshByProvider[providerId]
+            let stale = staleByProvider[providerId]
+
+            if let fresh, !fresh.windows.isEmpty {
+                merged.append(fresh)
+            } else if let stale, !stale.windows.isEmpty {
+                merged.append(stale)
+            } else if let fresh {
+                merged.append(fresh)
+            }
+        }
+
+        return merged
+    }
+
+    private func providersById(_ providers: [Provider]) -> [String: Provider] {
+        var byId: [String: Provider] = [:]
+        for provider in providers {
+            byId[provider.provider] = provider
+        }
+        return byId
     }
 
     private func staleFooter() -> NSView {
