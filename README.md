@@ -69,9 +69,10 @@ usage-hud claude                 # single provider
 usage-hud --compact              # one-line summary
 usage-hud --json                 # JSON output
 usage-hud --watch                # refresh every 30s
+usage-hud --no-cache             # force live fetch for debugging
 ```
 
-Symlinked to `~/.local/bin/usage-hud`. Results are cached at `~/.cache/meter/state.json` (60s TTL).
+Symlinked to `~/.local/bin/usage-hud`. Results are cached per provider at `~/.cache/meter/state.json` with a 3-minute TTL. If a live refresh fails and a previous successful result exists, the CLI returns that data with `stale: true` instead of breaking JSON consumers.
 
 ## Configuration
 
