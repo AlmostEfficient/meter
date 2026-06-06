@@ -4,13 +4,12 @@
 <img width="272" height="358" alt="image" src="https://github.com/user-attachments/assets/2838d8d4-a398-4490-9a16-29f7d9e9d2e1" />
   
 
-Floating macOS overlay showing AI tool usage. Also ships a CLI. Self-contained — no external dependencies beyond `swiftc` and `node`.
+Floating macOS overlay showing AI tool usage. Also ships a CLI. Self-contained — no external dependencies beyond `swiftc`.
 
 ## Requirements
 
 - macOS
 - `swiftc` (Xcode Command Line Tools)
-- `node` (ships with Claude Code, Cursor, and Codex — you already have it)
 
 ## Install
 

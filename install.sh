@@ -40,6 +40,6 @@ EOF
 launchctl unload "$plist" 2>/dev/null || true
 launchctl load "$plist"
 mkdir -p "$bin_dir"
-ln -sf "$dir/cli/usage-hud.js" "$cli_link"
+ln -sf "$dir/cli/usage-hud" "$cli_link"
 echo "Meter installed and running. Label: com.$(whoami).meter"
 echo "CLI installed: $cli_link"

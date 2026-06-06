@@ -1,0 +1,31 @@
+#!/bin/zsh
+set -euo pipefail
+
+script_dir="$(cd "$(dirname "$0")" && pwd)"
+root_dir="$(cd "$script_dir/.." && pwd)"
+bin="/private/tmp/meter-usage-hud"
+module_cache="/private/tmp/meter-cli-module-cache"
+srcs=(
+  "$root_dir/Models.swift"
+  "$root_dir/ProviderFetchers.swift"
+  "$script_dir/UsageHUD.swift"
+)
+
+needs_build=false
+if [[ ! -x "$bin" ]]; then
+  needs_build=true
+else
+  for src in "${srcs[@]}"; do
+    if [[ "$src" -nt "$bin" ]]; then
+      needs_build=true
+      break
+    fi
+  done
+fi
+
+if [[ "$needs_build" == true ]]; then
+  mkdir -p "$module_cache"
+  /usr/bin/swiftc -parse-as-library -module-cache-path "$module_cache" "${srcs[@]}" -o "$bin"
+fi
+
+exec "$bin" "$@"
